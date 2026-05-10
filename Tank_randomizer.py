@@ -5,7 +5,7 @@ import random
 import json
 import os
 
-API_KEY = "TO_API_KEY"
+API_KEY = "72581434ba12f4c4500d00618d0cdadf"
 BASE = "https://api.worldoftanks.eu/wot"
 
 HISTORY_FILE = "history.json"
