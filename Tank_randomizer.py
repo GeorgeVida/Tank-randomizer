@@ -1,160 +1,320 @@
-
-import streamlit as st
+import customtkinter as ctk
+import tkinter as tk
 import requests
 import random
-import json
-import os
+from PIL import Image, ImageTk
+import io
 
-API_KEY = "72581434ba12f4c4500d00618d0cdadf"
-BASE = "https://api.worldoftanks.eu/wot"
+# ================= CONFIG =================
 
-HISTORY_FILE = "history.json"
-FAV_FILE = "favorites.json"
+WG_APP_ID = "72581434ba12f4c4500d00618d0cdadf"
+
+# ================= GLOBALS =================
+
+xp = 0
+level = 1
+
+garage = []
+favorites = []
+
+tank_stats = {}
+img_ref = None
+
+# ================= LOAD ALL TANKS =================
+
+def load_all_tanks():
+
+    url = f"https://api.worldoftanks.eu/wot/encyclopedia/vehicles/?application_id={WG_APP_ID}"
+
+    try:
+        r = requests.get(url, timeout=10).json()
+        data = r.get("data", {})
+
+        tanks = {}
+
+        for t in data.values():
+            tanks[t["tank_id"]] = {
+                "name": t.get("name"),
+                "tier": str(t.get("tier")),
+                "nation": t.get("nation"),
+                "type": t.get("type"),
+                "image": t.get("images", {}).get("big_icon"),
+                "tank_id": t["tank_id"]
+            }
+
+        return tanks
+
+    except:
+        return {}
 
 
-# ---------------- STORAGE ----------------
+all_tanks = load_all_tanks()
 
-def load(file):
-    if not os.path.exists(file):
-        return []
-    with open(file, "r") as f:
-        return json.load(f)
+# ================= STATS API =================
 
-def save(file, data):
-    with open(file, "w") as f:
-        json.dump(data, f, indent=2)
+def load_tank_stats(account_id):
 
+    url = (
+        f"https://api.worldoftanks.eu/wot/tanks/stats/"
+        f"?application_id={WG_APP_ID}&account_id={account_id}"
+    )
 
-# ---------------- API ----------------
+    try:
+        r = requests.get(url, timeout=10).json()
+        data = r.get("data", {}).get(str(account_id), [])
+
+        stats = {}
+
+        for t in data:
+            stats[t["tank_id"]] = {
+                "battles": t["all"]["battles"],
+                "wins": t["all"]["wins"],
+                "damage": t["all"]["damage_dealt"]
+            }
+
+        return stats
+
+    except:
+        return {}
+
+# ================= ACCOUNT SEARCH =================
 
 def get_account_id(name):
-    r = requests.get(f"{BASE}/account/list/", params={
-        "application_id": API_KEY,
-        "search": name,
-        "limit": 1
-    }).json()
 
-    return r["data"][0]["account_id"] if r["data"] else None
+    url = f"https://api.worldoftanks.eu/wot/account/list/?application_id={WG_APP_ID}&search={name}"
 
-
-def get_tanks(account_id):
-    r = requests.get(f"{BASE}/account/tanks/", params={
-        "application_id": API_KEY,
-        "account_id": account_id
-    }).json()
-
-    return r["data"].get(str(account_id), [])
+    try:
+        r = requests.get(url, timeout=10).json()
+        data = r.get("data", [])
+        if not data:
+            return None
+        return data[0]["account_id"]
+    except:
+        return None
 
 
-def get_tank_info(tank_id):
-    r = requests.get(f"{BASE}/encyclopedia/vehicles/", params={
-        "application_id": API_KEY,
-        "tank_id": tank_id
-    }).json()
+def load_player_tanks(account_id):
 
-    return r["data"].get(str(tank_id))
+    url = f"https://api.worldoftanks.eu/wot/account/tanks/?application_id={WG_APP_ID}&account_id={account_id}"
 
+    try:
+        r = requests.get(url, timeout=10).json()
+        data = r.get("data", {}).get(str(account_id), [])
 
-# ---------------- LOGIC ----------------
+        ids = [t["tank_id"] for t in data]
 
-def winrate(stats):
-    b = stats["battles"]
-    return (stats["wins"] / b * 100) if b else 0
+        return [all_tanks[i] for i in ids if i in all_tanks]
 
+    except:
+        return []
 
-def avg_damage(stats):
-    b = stats["battles"]
-    return stats["damage_dealt"] // b if b else 0
+# ================= STATS HELPER =================
 
+def get_stats(tank_id):
 
-# ---------------- UI ----------------
+    s = tank_stats.get(tank_id)
 
-st.set_page_config(page_title="Tank Randomiser", layout="wide")
+    if not s or s["battles"] == 0:
+        return None
 
-st.title("🎲 Tank Randomiser")
+    wr = (s["wins"] / s["battles"]) * 100
+    dmg = s["damage"] / s["battles"]
 
+    return {
+        "wr": round(wr, 2),
+        "dmg": round(dmg),
+        "battles": s["battles"]
+    }
 
-player = st.text_input("Player name")
-min_tier = st.selectbox("Min tier", [None, 5, 6, 7, 8, 9, 10])
+# ================= PLAYER LOAD =================
 
-roll = st.button("🎰 Roll tank")
+def load_player():
 
+    global garage, tank_stats
 
-# session state
-if "history" not in st.session_state:
-    st.session_state.history = load(HISTORY_FILE)
+    name = player_var.get().strip()
 
-if "favorites" not in st.session_state:
-    st.session_state.favorites = load(FAV_FILE)
+    if not name:
+        set_result("Enter player name")
+        return
 
+    set_result("Loading...")
 
-# ---------------- MAIN ----------------
-
-if player:
-
-    account_id = get_account_id(player)
+    account_id = get_account_id(name)
 
     if not account_id:
-        st.error("Player not found")
-        st.stop()
+        set_result("Player not found")
+        return
 
-    tanks = get_tanks(account_id)
+    garage = load_player_tanks(account_id)
+    tank_stats = load_tank_stats(account_id)
 
-    if min_tier:
-        tanks = [t for t in tanks if t.get("tier", 0) >= min_tier]
+    update_filters()
+    update_stats()
 
+    set_result(f"Loaded {name} ({len(garage)} tanks)")
 
-    if roll and tanks:
+# ================= XP =================
 
-        # avoid repeats
-        recent = [t["tank_id"] for t in st.session_state.history[-5:]]
-        pool = [t for t in tanks if t["tank_id"] not in recent] or tanks
+def add_xp(amount=25):
 
-        chosen = random.choice(pool)
-        tank_id = chosen["tank_id"]
+    global xp, level
 
-        info = get_tank_info(tank_id)
-        stats = chosen["statistics"]
+    xp += amount
 
-        wr = winrate(stats)
-        dmg = avg_damage(stats)
+    if xp >= level * 120:
+        xp -= level * 120
+        level += 1
 
-        # save history
-        st.session_state.history.append(chosen)
-        save(HISTORY_FILE, st.session_state.history)
+    update_stats()
 
+# ================= FILTER =================
 
-        # ---------------- DISPLAY ----------------
+def filtered():
 
-        col1, col2 = st.columns([1, 2])
+    out = []
 
-        with col1:
-            st.image(info["images"]["big_icon"], width=250)
+    for t in garage:
 
-        with col2:
-            st.subheader(info["name"])
+        if tier_var.get() != "All" and t["tier"] != tier_var.get():
+            continue
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Battles", stats["battles"])
-            c2.metric("WR %", round(wr, 2))
-            c3.metric("Avg dmg", dmg)
+        if nation_var.get() != "All" and t["nation"] != nation_var.get():
+            continue
 
-            # buttons
-            if st.button("⭐ Add to favorites"):
-                st.session_state.favorites.append(chosen)
-                save(FAV_FILE, st.session_state.favorites)
+        if type_var.get() != "All" and t["type"] != type_var.get():
+            continue
 
-            if st.button("🔁 Roll again"):
-                st.rerun()
+        out.append(t)
 
+    return out
 
-# ---------------- SIDEBAR ----------------
+# ================= IMAGE =================
 
-st.sidebar.title("📊 Data")
+def load_image(url):
 
-st.sidebar.subheader("⭐ Favorites")
+    global img_ref
 
-for f in st.session_state.favorites[-10:]:
-    st.sidebar.write(f"Tank ID: {f['tank_id']}")
+    try:
+        r = requests.get(url, timeout=5)
+        img = Image.open(io.BytesIO(r.content))
+        img = img.resize((420, 220), Image.LANCZOS)
 
-st.sidebar.subheader("🕘 History")
+        img_ref = ImageTk.PhotoImage(img)
+        img_label.configure(image=img_ref)
+
+    except:
+        pass
+
+# ================= SPIN =================
+
+def spin():
+
+    pool = filtered()
+
+    if not pool:
+        set_result("No tanks")
+        return
+
+    def step(i=0):
+
+        if i < 20:
+
+            t = random.choice(pool)
+            set_result("🎲 " + t["name"])
+            app.after(50, lambda: step(i + 1))
+
+        else:
+
+            final = random.choice(pool)
+
+            s = get_stats(final["tank_id"])
+
+            text = "🎯 " + final["name"]
+
+            if s:
+                text += f"\nWR:{s['wr']}% | DMG:{s['dmg']} | B:{s['battles']}"
+
+            set_result(text)
+
+            load_image(final["image"])
+
+            if final["name"] not in favorites:
+                favorites.append(final["name"])
+
+    step()
+
+# ================= UI =================
+
+ctk.set_appearance_mode("dark")
+
+app = ctk.CTk()
+app.geometry("950x720")
+app.title("WoT Garage Game")
+
+player_var = ctk.StringVar()
+tier_var = ctk.StringVar(value="All")
+nation_var = ctk.StringVar(value="All")
+type_var = ctk.StringVar(value="All")
+
+img_label = tk.Label(app)
+img_label.pack(pady=10)
+
+def set_result(t):
+    result.configure(text=t)
+
+def update_stats():
+    stats.configure(text=f"Level {level} | XP {xp}/{level*120} | Tanks {len(garage)}")
+
+def update_filters():
+
+    if not garage:
+        return
+
+    tiers = ["All"] + sorted(set(t["tier"] for t in garage))
+    nations = ["All"] + sorted(set(t["nation"] for t in garage))
+    types = ["All"] + sorted(set(t["type"] for t in garage))
+
+    tier_menu.configure(values=tiers)
+    nation_menu.configure(values=nations)
+    type_menu.configure(values=types)
+
+# ================= INPUT =================
+
+frame = ctk.CTkFrame(app)
+frame.pack(pady=10)
+
+entry = ctk.CTkEntry(frame, textvariable=player_var, width=220)
+entry.grid(row=0, column=0)
+
+ctk.CTkButton(frame, text="LOAD", command=load_player).grid(row=0, column=1)
+
+# ================= RESULT =================
+
+result = ctk.CTkLabel(app, text="", font=("Arial", 22))
+result.pack()
+
+stats = ctk.CTkLabel(app, text="")
+stats.pack()
+
+# ================= FILTERS =================
+
+filter_frame = ctk.CTkFrame(app)
+filter_frame.pack(pady=10)
+
+tier_menu = ctk.CTkOptionMenu(filter_frame, variable=tier_var, values=["All"])
+tier_menu.grid(row=0, column=0)
+
+nation_menu = ctk.CTkOptionMenu(filter_frame, variable=nation_var, values=["All"])
+nation_menu.grid(row=0, column=1)
+
+type_menu = ctk.CTkOptionMenu(filter_frame, variable=type_var, values=["All"])
+type_menu.grid(row=0, column=2)
+
+# ================= BUTTON =================
+
+ctk.CTkButton(app, text="SPIN 🎰", command=spin).pack(pady=15)
+
+# ================= START =================
+
+app.mainloop()
